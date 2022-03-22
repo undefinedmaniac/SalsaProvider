@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Do not include our IDE stuff or API token
+.idea/
+TOKEN.py
