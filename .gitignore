@@ -130,4 +130,5 @@ dmypy.json
 
 # Do not include our IDE stuff or API token
 .idea/
-TOKEN.py
+private_settings.py
+*.db
