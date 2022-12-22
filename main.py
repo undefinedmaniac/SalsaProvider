@@ -6,6 +6,7 @@ import commands
 import fridge
 import on_message
 from fridge import Fridge
+from fridge import VoiceStatus
 import salsa_settings as ss
 
 from datetime import datetime
@@ -26,7 +27,7 @@ class SalsaClient(discord.Client):
         self._has_run_scheduler = False
         self._update_connected_task = None
 
-    def get_the_tunnel(self):
+    def get_the_tunnel(self) -> discord.Guild:
         return self.get_guild(ss.THE_TUNNEL_ID)
 
     async def update_connected(self):
@@ -70,6 +71,27 @@ class SalsaClient(discord.Client):
                 active_users[member.id] = fridge.user_status_adjust_mobile(utilities.convert_user_status(status),
                                                                            member.is_on_mobile())
         self._fridge.user_activity_init(active_users)
+
+        # Fill the fridge with the members who are currently in VC
+        active_users = {}
+        temp = None
+        accompanied = False
+        for channel in self.get_the_tunnel().voice_channels:
+            if channel == self.get_the_tunnel().afk_channel:
+                for member in channel.members:
+                    active_users[member.id] = VoiceStatus.AFK
+            else:
+                for member in channel.members:
+                    if temp is None:
+                        temp = member
+                    else:
+                        accompanied = True
+                        active_users[member.id] = VoiceStatus.Accompanied
+
+        if temp is not None:
+            active_users[temp.id] = VoiceStatus.Accompanied if accompanied else VoiceStatus.Unaccompanied
+
+        self._fridge.voice_activity_init(active_users)
 
         # We want to update the connected timestamp, so we will start the task if it is not already running
         if self._update_connected_task is None:
@@ -131,28 +153,66 @@ class SalsaClient(discord.Client):
         if ss.SHOW_SHRIMP_SUPPORT and reaction.emoji == "🦐":
             await reaction.message.add_reaction("🦐")
 
-    async def on_voice_state_update(self, member, before, after):
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState,
+                                    after: discord.VoiceState):
         if member == self.user:
             return
 
         newly_joined = before.channel is None and after.channel is not None
         current_datetime = datetime.now()
 
-        # Sometimes send messages when people join VC
-        if ss.WELCOME_GARON_HOME and member.id == ss.NAME_TO_ID["Garon"] and newly_joined and \
-                current_datetime.weekday() in ss.WELCOME_GARON_HOME_DAYS and \
-                random.random() < ss.WELCOME_GARON_HOME_PROBABILITY and \
-                ss.WELCOME_GARON_HOME_TIME_RANGE[0] <= current_datetime.time() <= ss.WELCOME_GARON_HOME_TIME_RANGE[1]:
-            await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(f'Welcome home {member.mention}! How was work?')
-        elif ss.check_enabled(ss.JOIN_MESSAGES, ss.JOIN_MESSAGES_WHITELIST, member.id) and newly_joined and \
-                (random.random() < ss.JOIN_MESSAGES_LIST[member.id][1]):
-            await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.JOIN_MESSAGES_LIST[member.id][0])
-        elif ss.BOZO_DETECTION and member.id in ss.BOZO_DETECTION_SENSITIVITY and newly_joined:
-            # Bozo detection :)
-            if random.random() < ss.BOZO_DETECTION_SENSITIVITY[member.id]:
-                bozo_channel = self.get_channel(ss.VOICE_CHANNEL_IDS["Bozo's"])
-                await member.move_to(bozo_channel)
-                await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.BOZO_DETECTED_GIF)
+        # Ensure there was a channel change
+        if before.channel != after.channel:
+            normal_channels = set(channel for channel in self.get_the_tunnel().voice_channels if
+                                  channel != self.get_the_tunnel().afk_channel)
+            group_size = sum(len(channel.members) for channel in normal_channels)
+
+            # First update the status of other user who may be in the 'normal' voice channels (non-AFK)
+            left_normal_channel = before.channel in normal_channels
+            joined_normal_channel = after.channel in normal_channels
+            if left_normal_channel ^ joined_normal_channel and group_size == int(joined_normal_channel) + 1:
+                for channel in normal_channels:
+                    for existing_member in channel.members:
+                        if existing_member == member:
+                            continue
+
+                        # Update this special member's status
+                        status = VoiceStatus.Unaccompanied if left_normal_channel else VoiceStatus.Accompanied
+                        print(f"Update {existing_member.name}'s status to {status.name}")
+                        self._fridge.voice_activity_update(existing_member.id, status, current_datetime)
+                        break
+
+            # Then update our own status
+            status = None
+            if after.channel is None:
+                status = VoiceStatus.Disconnected
+            elif after.afk:
+                status = VoiceStatus.AFK
+            elif joined_normal_channel and not left_normal_channel:
+                status = VoiceStatus.Unaccompanied if group_size == 1 else VoiceStatus.Accompanied
+
+            # Update our own status
+            if status is not None:
+                print(f"Update {member.name}'s status to {status.name}")
+                self._fridge.voice_activity_update(member.id, status, current_datetime)
+
+        if newly_joined:
+            # Sometimes send messages when people join VC
+            if ss.WELCOME_GARON_HOME and member.id == ss.NAME_TO_ID["Garon"] and current_datetime.weekday() \
+                    in ss.WELCOME_GARON_HOME_DAYS and random.random() < ss.WELCOME_GARON_HOME_PROBABILITY and \
+                    ss.WELCOME_GARON_HOME_TIME_RANGE[0] <= current_datetime.time() <= \
+                    ss.WELCOME_GARON_HOME_TIME_RANGE[1]:
+                await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(
+                    f'Welcome home {member.mention}! How was work?')
+            elif ss.check_enabled(ss.JOIN_MESSAGES, ss.JOIN_MESSAGES_WHITELIST, member.id) and \
+                    (random.random() < ss.JOIN_MESSAGES_LIST[member.id][1]):
+                await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.JOIN_MESSAGES_LIST[member.id][0])
+            elif ss.BOZO_DETECTION and member.id in ss.BOZO_DETECTION_SENSITIVITY:
+                # Bozo detection :)
+                if random.random() < ss.BOZO_DETECTION_SENSITIVITY[member.id]:
+                    bozo_channel = self.get_channel(ss.VOICE_CHANNEL_IDS["Bozo's"])
+                    await member.move_to(bozo_channel)
+                    await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.BOZO_DETECTED_GIF)
 
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
         if before == self.user:

@@ -1,8 +1,8 @@
-import os.path
 import sqlite3
 from enum import IntEnum
 from datetime import datetime
 from datetime import timedelta
+from typing import Type, Union, Dict
 
 
 class SalsaStatus(IntEnum):
@@ -47,8 +47,9 @@ def user_status_adjust_mobile(status: UserStatus, is_mobile: bool = True) -> Use
 
 
 class VoiceStatus(IntEnum):
-    Talking = 0
-    AFK = 1
+    Unaccompanied = 0,
+    Accompanied = 1,
+    AFK = 2
 
     Disconnected = -1  # Not actually used in the db. Listed for completion and internal comparisons
 
@@ -74,7 +75,7 @@ class Fridge:
 
     # Initialize logging of user activity (e.g. discord status - Online, Idle, Do Not Disturb)
     # active_users must be an up-to-date list of the {user_id,status} of non-offline users
-    def user_activity_init(self, active_users):
+    def user_activity_init(self, active_users: Dict[int, UserStatus]):
         current_timestamp = datetime.now()
         last_connected_timestamp = self._connection.execute(
             'SELECT timestamp FROM SalsaActivity WHERE status=? ORDER BY timestamp DESC LIMIT 1',
@@ -120,6 +121,54 @@ class Fridge:
             if status != UserStatus.Offline:
                 self._connection.execute('INSERT INTO UserActivity VALUES(?,?,?,NULL)', (alias_id, status, timestamp))
 
+    # Initialize logging of voice activity (e.g. Unaccompanied, Accompanied, AFK, Disconnected)
+    # active_users must be an up-to-date list of the {user_id,status} of non-disconnected users
+    def voice_activity_init(self, active_users: Dict[int, VoiceStatus]):
+        current_timestamp = datetime.now()
+        last_connected_timestamp = self._connection.execute(
+            'SELECT timestamp FROM SalsaActivity WHERE status=? ORDER BY timestamp DESC LIMIT 1',
+            (SalsaStatus.Connected,)).fetchone()
+
+        if last_connected_timestamp is None:
+            # If there is no connected timestamp, this must be a new db and the VoiceActivity table must also be empty
+            table_has_content = self._connection.execute('SELECT EXISTS(SELECT 1 FROM VoiceActivity)').fetchone()[0]
+            if table_has_content:
+                raise Exception('Database corruption!')
+        elif current_timestamp - last_connected_timestamp[0] > ACCEPTABLE_DOWNTIME:
+            # If we have been disconnected for longer than the acceptable downtime, we must finish old activity entries
+            # in the db and assume that those users left VC when we were disconnected
+            with self._connection:
+                self._connection.execute(
+                    'UPDATE VoiceActivity SET duration=MAX(?-start,0) WHERE duration IS NULL',
+                    (last_connected_timestamp[0],))
+        else:
+            # If we have been disconnected for less than the acceptable downtime, then we may assume that any users who
+            # were previously in VC and are STILL in VC have not moved during our period of downtime
+            change_timestamp = last_connected_timestamp[0] + (current_timestamp - last_connected_timestamp[0]) / 2
+            for user_id, db_status in self._connection.execute(
+                    'SELECT id, status FROM VoiceActivityView WHERE duration IS NULL'):
+                current_status = active_users.pop(user_id, VoiceStatus.Disconnected)
+                if db_status != current_status:
+                    self.voice_activity_update(user_id, current_status, change_timestamp)
+
+        # For any users who are currently in VC and not present in the database, open entries for them
+        for user_id, current_status in active_users.items():
+            self.voice_activity_update(user_id, current_status, current_timestamp)
+
+    def voice_activity_update(self, user_id: int, status: VoiceStatus, timestamp=None):
+        if timestamp is None:
+            timestamp = datetime.now()
+
+        # Close any open entry for this user and then open a new entry with the updated status
+        alias_id = self.get_alias_id(user_id)
+        with self._connection:
+            self._connection.execute(
+                'UPDATE VoiceActivity SET duration=MAX(?-start,0) WHERE '
+                'duration IS NULL AND id=?', (timestamp, alias_id))
+
+            if status != VoiceStatus.Disconnected:
+                self._connection.execute('INSERT INTO VoiceActivity VALUES(?,?,?,NULL)', (alias_id, status, timestamp))
+
     # Get the alias ID for a given discord user_id. The alias ID is the rowid of the discord user_id inside the UserIDs
     # table. We are using alias IDs in place of discord IDs in order to make our db size as small as possible
     def get_alias_id(self, user_id: int):
@@ -146,7 +195,11 @@ class Fridge:
 
             'CREATE VIEW IF NOT EXISTS UserActivityView AS '
             'SELECT UserIDs.id, UserActivity.status, UserActivity.start, UserActivity.duration '
-            'FROM UserActivity LEFT JOIN UserIDs ON UserActivity.id=UserIDs.rowid'
+            'FROM UserActivity LEFT JOIN UserIDs ON UserActivity.id=UserIDs.rowid',
+
+            'CREATE VIEW IF NOT EXISTS VoiceActivityView AS '
+            'SELECT UserIDs.id, VoiceActivity.status, VoiceActivity.start, VoiceActivity.duration '
+            'FROM VoiceActivity LEFT JOIN UserIDs ON VoiceActivity.id=UserIDs.rowid'
         ]
         with self._connection:
             for sql in sql_tables:
