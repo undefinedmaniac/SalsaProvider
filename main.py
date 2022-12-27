@@ -1,5 +1,6 @@
 import random
 import discord
+import discord.ext.commands
 import asyncio
 
 import commands
@@ -16,10 +17,32 @@ import utilities
 from typing_tracker import TypingTracker
 from typing_insulter import TypingInsulter
 
+# 1. Christmas Eve is always the 24th of December
+# 2. Christmas is always the 25th of December
+# 3. Thanksgiving is the 4th Thursday of November
+# 4. New years
+# 5. Halloween is always October 31st
+# 6. 'milk' -> did you mean cum? and then delete
+# 7. Goodnight Garon
+# 8. Message on leap day (February 29th)
+# 9. Valentines day (February 14th)
+# 10. 4th of July
+# 11. Easter
+# 12. ToDo list / Reminders
 
-class SalsaClient(discord.Client):
-    def __init__(self, fridge, **options):
-        super().__init__(**options)
+
+class SalsaClient(discord.ext.commands.Bot):
+    def __init__(self, fridge):
+        # Create Intents
+        intents = discord.Intents().default()
+        intents.members = True
+        intents.presences = True
+        intents.message_content = True
+
+        # I am the owner of the bot :)
+        self.owner_id = ss.NAME_TO_ID['Ian']
+
+        super().__init__(command_prefix=['$'], intents=intents)
         self._fridge: Fridge = fridge
         self._typing_tracker = TypingTracker(self)
         self._typing_insulter = TypingInsulter()
@@ -56,9 +79,45 @@ class SalsaClient(discord.Client):
         return self.fish_gaming_wednesday(), \
             (datetime.now() + timedelta(weeks=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
+    async def setup_hook(self):
+        # Load app commands
+        commands.load_app_commands(self)
+
     async def on_ready(self):
         print("We are connected and ready!")
 
+        await self.on_ready_or_resume()
+
+        # Prevent the scheduler from being run more than once
+        if self._has_run_scheduler:
+            return
+        self._has_run_scheduler = True
+
+        # Setup daily task
+        self._long_term_scheduler.schedule(self.run_daily(), datetime.now())
+
+        # Setup birthday tasks
+        for user_id in ss.BIRTHDAYS.keys():
+            self._long_term_scheduler.schedule(self.birthday(user_id), utilities.get_next_birthday(user_id))
+
+        # Fish gaming Wednesday
+        if ss.FISH_GAMING_WEDNESDAY:
+            starting_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if starting_time.weekday() == 2:
+                starting_time = starting_time + timedelta(days=1)
+            while starting_time.weekday() != 2:
+                starting_time = starting_time + timedelta(days=1)
+
+            self._long_term_scheduler.schedule(self.fish_gaming_wednesday(), starting_time)
+
+        # Allow long term tasks to be executed
+        await self._long_term_scheduler.run()
+
+    async def on_resumed(self):
+        await self.on_ready_or_resume()
+
+    async def on_ready_or_resume(self):
+        print(f'Ready or Resume. {datetime.now()}')
         # Fill the fridge with the currently active members
         active_users = {}
         for member in self.get_the_tunnel().members:
@@ -97,34 +156,6 @@ class SalsaClient(discord.Client):
         if self._update_connected_task is None:
             self._update_connected_task = self._long_term_scheduler.schedule(self.update_connected(), datetime.now())
 
-        # Prevent the scheduler from being run more than once
-        if self._has_run_scheduler:
-            return
-        self._has_run_scheduler = True
-
-        # Setup daily task
-        self._long_term_scheduler.schedule(self.run_daily(), datetime.now())
-
-        # Setup birthday tasks
-        for user_id in ss.BIRTHDAYS.keys():
-            self._long_term_scheduler.schedule(self.birthday(user_id), utilities.get_next_birthday(user_id))
-
-        # Fish gaming Wednesday
-        if ss.FISH_GAMING_WEDNESDAY:
-            starting_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            if starting_time.weekday() == 2:
-                starting_time = starting_time + timedelta(days=1)
-            while starting_time.weekday() != 2:
-                starting_time = starting_time + timedelta(days=1)
-
-            self._long_term_scheduler.schedule(self.fish_gaming_wednesday(), starting_time)
-
-        # Allow long term tasks to be executed
-        await self._long_term_scheduler.run()
-
-    async def on_connect(self):
-        pass
-
     async def on_disconnect(self):
         print("We have been disconnected!")
         # We have disconnected, stop updating the connected timestamp
@@ -132,11 +163,14 @@ class SalsaClient(discord.Client):
             self._update_connected_task.cancel()
             self._update_connected_task = None
 
-    async def on_message(self, message):
+    async def on_message(self, message: discord.Message):
         if message.author == self.user:
             return
 
         self._typing_tracker.on_message(message.author)
+
+        # We must call this to ensure that discord.Bot commands work properly
+        await self.process_commands(message)
 
         # Don't do other things if this message was a command request
         if await commands.handle(self, message):
@@ -252,18 +286,16 @@ class SalsaClient(discord.Client):
         if self._update_connected_task is not None:
             self._fridge.salsa_activity_update_connected()
 
+    @property
+    def fridge(self):
+        return self._fridge
+
 
 def main():
-    # Create Intents
-    intents = discord.Intents().default()
-    intents.members = True
-    intents.presences = True
-    intents.message_content = True
-
     # Fridge is the SQLite3 database backend for SalsaProvider
     with Fridge('salsa.db') as fridge:
         # Start the SalsaClient
-        client = SalsaClient(fridge, intents=intents)
+        client = SalsaClient(fridge)
 
         async def runner():
             async with client:

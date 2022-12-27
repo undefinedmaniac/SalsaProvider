@@ -2,7 +2,7 @@ import sqlite3
 from enum import IntEnum
 from datetime import datetime
 from datetime import timedelta
-from typing import Type, Union, Dict
+from typing import Type, Union, Dict, Tuple, Optional
 
 
 class SalsaStatus(IntEnum):
@@ -29,6 +29,16 @@ class UserStatus(IntEnum):
 
     Offline = -1  # Not actually used in the db. Listed for completion and internal comparisons
 
+    def __str__(self):
+        value_strip_mobile = user_status_adjust_mobile(UserStatus(self.value), False)
+
+        if value_strip_mobile == UserStatus.DoNotDisturb:
+            name = 'Do Not Disturb'
+        else:
+            name = value_strip_mobile.name
+
+        return name + ' on Mobile' if user_status_check_mobile(UserStatus(self.value)) else name
+
 
 # Check if a given UserStatus is a mobile status (e.g. the user is on their phone)
 def user_status_check_mobile(status: UserStatus) -> bool:
@@ -52,6 +62,9 @@ class VoiceStatus(IntEnum):
     AFK = 2
 
     Disconnected = -1  # Not actually used in the db. Listed for completion and internal comparisons
+
+    def __str__(self):
+        return self.name
 
 
 ACCEPTABLE_DOWNTIME = timedelta(minutes=10)
@@ -121,6 +134,11 @@ class Fridge:
             if status != UserStatus.Offline:
                 self._connection.execute('INSERT INTO UserActivity VALUES(?,?,?,NULL)', (alias_id, status, timestamp))
 
+    def get_last_user_activity(self, user_id: int) -> Optional[Tuple[UserStatus, datetime, timedelta]]:
+        activity_info = self._connection.execute('SELECT status, start, duration FROM UserActivityView '
+                                                 'WHERE id=? ORDER BY start DESC LIMIT 1', (user_id,)).fetchone()
+        return activity_info
+
     # Initialize logging of voice activity (e.g. Unaccompanied, Accompanied, AFK, Disconnected)
     # active_users must be an up-to-date list of the {user_id,status} of non-disconnected users
     def voice_activity_init(self, active_users: Dict[int, VoiceStatus]):
@@ -168,6 +186,11 @@ class Fridge:
 
             if status != VoiceStatus.Disconnected:
                 self._connection.execute('INSERT INTO VoiceActivity VALUES(?,?,?,NULL)', (alias_id, status, timestamp))
+
+    def get_last_voice_activity(self, user_id: int) -> Optional[Tuple[VoiceStatus, datetime, timedelta]]:
+        activity_info = self._connection.execute('SELECT status, start, duration FROM VoiceActivityView '
+                                                 'WHERE id=? ORDER BY start DESC LIMIT 1', (user_id,)).fetchone()
+        return activity_info
 
     # Get the alias ID for a given discord user_id. The alias ID is the rowid of the discord user_id inside the UserIDs
     # table. We are using alias IDs in place of discord IDs in order to make our db size as small as possible
@@ -231,6 +254,16 @@ class Fridge:
         sqlite3.register_adapter(timedelta, adapt_duration)
         sqlite3.register_converter('duration', convert_duration)
 
+        # Register converters for User and Voice status so that we will get the enum type in queries
+        def convert_user_status(user_status: bytes):
+            return UserStatus(int(user_status))
+
+        def convert_voice_status(voice_status: bytes):
+            return VoiceStatus(int(voice_status))
+
+        sqlite3.register_converter('UserStatus', convert_user_status)
+        sqlite3.register_converter('VoiceStatus', convert_voice_status)
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -241,4 +274,4 @@ if __name__ == '__main__':
     # with Fridge('test.db') as fridge:
     #     fridge.salsa_activity_update_connected()
     #     fridge.user_activity_init({})
-    print([user_status_adjust_mobile(x, True) for x in UserStatus])
+    print(UserStatus.DoNotDisturb)

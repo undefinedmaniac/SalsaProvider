@@ -1,53 +1,68 @@
+import datetime
 import re
 import random
-
+import inspect
 import asyncio
+from typing import Union, List, Optional, Callable, Awaitable, Any, Type
+
 import discord
+from discord import app_commands
+
+import fridge
 import salsa_settings as ss
 from functools import partial
+
+from fridge import UserStatus, VoiceStatus
+from main import SalsaClient
 
 # Stores the last command issued by each user
 last_command = {}
 
+BOT_COMMAND_PATTERN = re.compile(r"(?i)^!salsa\s*(.*?)\s*$")
 
-BOT_COMMAND_PATTERN = re.compile(r"^!(?i)salsa(.*)$")
+
+class CommandContext:
+    def __init__(self, bot: SalsaClient, context: Union[discord.Message, discord.Interaction]):
+        self.context = context
+        self.bot = bot
+
+        # Setup send() function to use the correct underlying f() call
+        if self.is_message():
+            self._send = self.context.channel.send
+            self.author = self.context.author
+        else:
+            self._send = self.context.response.send_message
+            self.author = self.context.user
+
+    async def send(self, *args, **kwargs):
+        await self._send(*args, **kwargs)
+        if not self.is_message():
+            self._send = self.context.followup.send
+
+    async def defer(self):
+        if not self.is_message():
+            await self.context.response.defer()
+            self._send = self.context.followup.send
+
+    def is_message(self):
+        return isinstance(self.context, discord.Message)
 
 
-async def handle(client, message):
-    # See if the message starts with !salsa
-    match = BOT_COMMAND_PATTERN.fullmatch(message.content)
-    if not match:
-        return False
+async def _default_match(command_name: str, command_text: str) -> Optional[List[str]]:
+    text_parts = command_text.split()
 
-    # Fetch the arguments to the command
-    command_args = match.group(1).strip()
-    lowercase_args = command_args.lower()
+    length = 0
+    for index, part in enumerate(text_parts):
+        length += len(part)
+        if length > len(command_name):
+            return None
+        elif length == len(command_name):
+            if ''.join(text_parts[:index + 1]).lower() != command_name.lower():
+                return None
 
-    # Try to match the command to one of our command functions
-    commands = [_help, _redo, _have_salsa_instead, _flip_a_coin, _pick_a_number, _choose_from, _magic_8_ball,
-                _unlibrary, _nick, _clear_nick,
-                partial(_move_everyone_to_channel, "general", "General"),
-                partial(_move_everyone_to_channel, "second", "second"),
-                partial(_move_everyone_to_channel, "afk", "ahhpppfffkk"),
-                partial(_move_everyone_to_channel, "library", "Library"), _thanks, _insults]
+            return text_parts[index + 1:]
 
-    matching_command = False
-    for command in commands:
-        if await command(client, message, command_args, lowercase_args):
-            matching_command = True
-
-            # Remember the last successful command from each user, but only if it's not the redo command
-            if command != _redo:
-                last_command[message.author.id] = message
-
-            break
-
-    # No dice, tell the user they did it wrong
-    if not matching_command:
-        # Unknown command
-        await message.channel.send(f'Unknown command: `{command_args}`. Try `!salsa` for help!')
-
-    return True
+    return None
 
 
 # Verifies that a user is a Member and that they have the 'big boss role'
@@ -62,88 +77,534 @@ def _has_boss_role(member):
     return False
 
 
-async def _help(client, message, args, args_lower):
-    if args_lower and args_lower != "help":
-        return False
-
-    # Print the help page
-    await message.channel.send("```SalsaProvider Commands:\n"
-                               "!salsa help - Display help information\n"
-                               "!salsa redo - Execute your previous command again\n"
-                               "!salsa flip a coin - Perform a coin flip\n"
-                               "!salsa pick a number <first#> - <second#> - Pick a number from a range\n"
-                               "!salsa m8b [question] - Magic 8 Ball, the question is optional\n"
-                               "!salsa choose [count] from <comma separated list of options> - "
-                               "Choose one or more options from a list\n"
-                               "Requires 'Big Boss Role':\n"
-                               "!salsa general - Move all users to the General channel\n"
-                               "!salsa second - Move all users to the second channel\n"
-                               "!salsa afk - Move all users to the ahhpppfffkk channel\n"
-                               "!salsa library - Move all users to the Library channel\n"
-                               "!salsa unlibrary - Remove all users from the Library\n"
-                               "!salsa nick <Username> <Nickname> - Nickname a user\n"
-                               "!salsa clear nick [Username] - Clear the nickname for a user```\n")
-
-    return True
-
-
-async def _redo(client, message, args, args_lower):
-    if args_lower != 'redo':
-        return False
-
-    command_message = last_command.get(message.author.id)
-    if command_message is None:
-        await message.channel.send('If you\'ve used a command previously, I can\'t remember what it was. Sorry :(')
-    else:
-        await handle(client, command_message)
-
-    return True
-
-
-async def _have_salsa_instead(client, message, args, args_lower):
+async def _have_salsa_instead(context: CommandContext):
     # Random chance to sabotage other commands and deliver salsa instead
     if random.random() >= ss.HAVE_SALSA_INSTEAD_PROBABILITY:
         return False
 
-    await message.channel.send("Instead of that, have some salsa! :)")
-    if random.random() < ss.MESS_UP_AND_GIVE_SHRIMP_PROBABILITY:
+    await context.send("Instead of that, have some salsa! :)")
+    # TODO remove this extra check once we upgrade to discord.py v2.1
+    if random.random() < ss.MESS_UP_AND_GIVE_SHRIMP_PROBABILITY and context.is_message():
         # Mess up and give them shrimp first
-        await message.channel.send(random.choice(ss.SHRIMP_IMAGES), delete_after=8)
+        await context.send(random.choice(ss.SHRIMP_IMAGES), delete_after=8)
         await asyncio.sleep(5)
-        await message.channel.send("OOPS! Wrong one!! :sweat_smile:", delete_after=4)
+        await context.send("OOPS! Wrong one!! :sweat_smile:", delete_after=4)
         await asyncio.sleep(5)
 
-    await message.channel.send(random.choice(ss.SALSA_IMAGES))
-
+    await context.send(random.choice(ss.SALSA_IMAGES))
     return True
 
 
-async def _flip_a_coin(client, message, args, args_lower):
-    if args_lower.replace(" ", "") != "flipacoin":
-        return False
+class SalsaCommand:
+    def __init__(self, name: str, description: str,
+                 invoke_func: Callable[[CommandContext, ...], Awaitable[None]],
+                 match_func: Callable[[str], Awaitable[Optional[List[str]]]] = None):
+        self.name = name
+        self.description = description
+        self._invoke = invoke_func
+        self.match = partial(_default_match, name) if match_func is None else match_func
 
-    # Flip a coin
-    await message.channel.send(f'The result is: `{random.choice(["Heads", "Tails"])}`')
-    return True
+    # Returns the parameters to the command. When calling self.invoke(), the inputs should be
+    # 1. A CommandContext object and 2. a list of parameters corresponding to the ones returned by this method
+    def get_parameters(self) -> List[inspect.Parameter]:
+        return [parameter for i, parameter in enumerate(inspect.signature(self._invoke).parameters.values()) if i != 0]
+
+    def get_docs(self) -> str:
+        return self._invoke.__doc__
+
+    # Invokes the command with the provided parameters
+    async def invoke(self, context: CommandContext, *args, **kwargs) -> None:
+        # Store this command + args so that the user can use the redo command later if they wish
+        last_command[context.author.id] = (self, args, kwargs)
+
+        # If we do not decide to give the user salsa instead, invoke the requested command
+        if not await _have_salsa_instead(context):
+            await self._invoke(context, *args, **kwargs)
 
 
-async def _unlibrary(client, message, args, args_lower):
-    if args_lower != "unlibrary":
-        return False
+# This is a special command. It will act like a normal command with no parameters, however, when invoked it will look up
+# the previously run command for the user and then invoke that command instead, reusing the previous parameters
+class RedoCommand(SalsaCommand):
+    def __init__(self):
+        super().__init__(name='redo', description='Execute your previous command again', invoke_func=None)
 
-    if _has_boss_role(message.author):
-        general_channel = client.get_channel(ss.VOICE_CHANNEL_IDS["General"])
-        library_channel = client.get_channel(ss.VOICE_CHANNEL_IDS["Library"])
+    def get_parameters(self) -> List[inspect.Parameter]:
+        return []
 
-        for member in library_channel.members:
-            await member.move_to(general_channel)
-    else:
-        await message.channel.send("You can't use this command here!")
+    def get_docs(self) -> str:
+        return ""
 
-    return True
+    async def invoke(self, context: CommandContext, *args, **kwargs) -> None:
+        command_info = last_command.get(context.author.id)
+        if command_info is None:
+            await context.send('If you\'ve used a command previously, I can\'t remember what it was. Sorry :(')
+        else:
+            await command_info[0].invoke(context, *command_info[1], **command_info[2])
 
 
-NICKNAME_PATTERN = re.compile(r"[nN][iI][cC][kK]\s+(.+?)\s(.*)")
+def _seen():
+    async def invoke(context: CommandContext, member: discord.Member) -> None:
+        """
+        Args:
+            member: The Discord member whose last seen info should be displayed
+        """
+        # Permission check
+        if not _has_boss_role(context.author):
+            await context.send("You don't have permission to use this command!")
+            return
+
+        if member == context.bot.user:
+            # Protect SalsaProvider from being nicknamed
+            await context.send("I am always here. I see you. Not the other way around :grinning:")
+            return
+
+        def get_color_circle(status: UserStatus):
+            is_mobile = fridge.user_status_check_mobile(status)
+            status = fridge.user_status_adjust_mobile(status, False)
+
+            text = ''
+            if status == UserStatus.Online:
+                text = ':green_circle:'
+            elif status == UserStatus.Idle:
+                text = ':yellow_circle:'
+            elif status == UserStatus.DoNotDisturb:
+                text = ':red_circle:'
+
+            return text + (':mobile_phone:' if is_mobile else '')
+
+        current_timestamp = datetime.datetime.now()
+        last_activity = context.bot.fridge.get_last_user_activity(member.id)
+        if last_activity is None:
+            description = f'There is no activity history for {member.name}. This could be my fault, or, it may have ' \
+                          f'been a very long time since their last activity'
+            last_known_status = 'No History'
+        elif last_activity[2] is None:
+            # Currently online/idle/dnd
+            description = f'{member.name} is currently active and has been active since ' \
+                          f'{last_activity[1].strftime("%I:%M %p (%H:%M)")}'
+            duration = round((current_timestamp - last_activity[1]) / datetime.timedelta(minutes=1))
+            last_known_status = f'{get_color_circle(last_activity[0])} {last_activity[0]} for {duration} minutes'
+        else:
+            last_active_timestamp = last_activity[1] + last_activity[2]
+            description = last_active_timestamp.strftime(
+                f'{member.name} was last seen on %A, %B %d, %Y (%m/%d/%y) at %I:%M %p (%H:%M). They have been Offline '
+                f'for {round((current_timestamp-last_active_timestamp)/datetime.timedelta(minutes=1))} minutes')
+            last_known_status = f'{get_color_circle(last_activity[0])} {last_activity[0]} for ' \
+                                f'{last_activity[2].days*24*60 + round(last_activity[2].seconds/60)} minutes'
+
+        title_insert = member.name if member.name == member.display_name else f'{member.name} ({member.display_name})'
+        embed = discord.Embed(title=f'When Was {title_insert} Last Seen?',
+                              description=description,
+                              color=discord.Color.dark_red(), timestamp=current_timestamp)
+        embed.set_footer(text='Information is not Garon-teed to be accurate. '
+                              'Based on SalsaProvider™️ observations')
+
+        embed.add_field(name='Last Known Status', value=last_known_status, inline=False)
+
+        last_vc_activity = context.bot.fridge.get_last_voice_activity(member.id)
+        if last_vc_activity is None:
+            value = f'There is no VC history for {member.name}. This could be my fault, or, it may have been a very ' \
+                    f'long time since their last VC'
+            last_vc_status = 'No History'
+        elif last_vc_activity[2] is None:
+            # Currently online/idle/dnd
+            value = f'{member.name} is currently in VC and has been active since ' \
+                    f'{last_vc_activity[1].strftime("%I:%M %p (%H:%M)")}'
+            duration = round((current_timestamp - last_vc_activity[1]) / datetime.timedelta(minutes=1))
+            last_vc_status = f'{last_vc_activity[0]} for {duration} minutes'
+        else:
+            last_active_timestamp = last_vc_activity[1] + last_vc_activity[2]
+            value = last_active_timestamp.strftime(
+                f'{member.name} was last seen in VC on %A, %B %d, %Y (%m/%d/%y) at %I:%M %p (%H:%M). They have been '
+                f'Disconnected for '
+                f'{round((current_timestamp-last_active_timestamp)/datetime.timedelta(minutes=1))} minutes')
+            last_vc_status = f'{last_vc_activity[0]} for ' \
+                             f'{last_vc_activity[2].days*24*60 + round(last_vc_activity[2].seconds/60)} minutes'
+
+        embed.add_field(name='Last VC Activity', value=value, inline=False)
+        embed.add_field(name='Last VC Status', value=last_vc_status, inline=False)
+
+        await context.send(embed=embed)
+
+        # embed = discord.Embed(title='This is the Title', description='This is the description',
+        #                       color=discord.Color.dark_red())
+        # embed.add_field(name='Field 1', value='Value 1', inline=True)
+        # embed.add_field(name='Field 2', value='Value 2', inline=True)
+        # embed.add_field(name='Field 3', value='Value 3', inline=True)
+        #
+        # embed.add_field(name='Non-Inline Field', value='Non-Inline Value')
+        #
+        # await context.send(embed=embed)
+
+    return SalsaCommand(name='seen', description='Display information about when a member was last seen',
+                        invoke_func=invoke)
+
+
+def _juggle():
+    async def invoke(context: CommandContext, member: discord.Member) -> None:
+        """
+        Args:
+            member: The Discord member who should be juggled
+        """
+        # Permission check
+        if not _has_boss_role(context.author):
+            await context.send("You don't have permission to use this command!")
+            return
+
+        if member == context.bot.user:
+            await context.send(f'Doesn\'t work on me :sunglasses:')
+            return
+
+        if member.voice is not None and isinstance(member.voice.channel, discord.VoiceChannel):
+            current_channel = member.voice.channel
+            if current_channel.guild != context.bot.get_the_tunnel():
+                await context.send(f'I can only juggle people who are in {context.bot.get_the_tunnel().name}!')
+                return
+
+            voice_channels = [channel for channel in context.bot.get_the_tunnel().channels if
+                              isinstance(channel, discord.VoiceChannel)]
+
+            # This next part will take a bit of time
+            await context.defer()
+
+            # Let the juggling commence
+            count = 0
+            target_count = random.randint(3, 5)
+            while count < target_count or member.voice.channel == current_channel:
+                while True:
+                    new_channel = random.choice(voice_channels)
+                    if new_channel != member.voice.channel:
+                        break
+                try:
+                    await member.move_to(new_channel)
+                except Exception:
+                    pass
+
+                count += 1
+                await asyncio.sleep(0.4)
+
+            # Finally, put the victim back where they started
+            try:
+                await member.move_to(current_channel)
+            except Exception:
+                pass
+
+            await context.send('Done!')
+        else:
+            await context.send(f'{member.name} is not connected to a voice channel!')
+
+    return SalsaCommand(name='juggle', description='Move someone around a bit', invoke_func=invoke)
+
+
+def _move_all():
+    async def invoke(context: CommandContext, channel: discord.VoiceChannel = None) -> None:
+        """
+        Args:
+            channel: The voice channel to which all server members should be moved. Uses General if not specified
+        """
+        # Permission check
+        if not _has_boss_role(context.author):
+            await context.send("You don't have permission to use this command!")
+            return
+
+        # Fetch the list of voice channels so that we can move users who are in these channels to the target channel
+        other_channels = []
+        for guild_channel in context.bot.get_the_tunnel().channels:
+            if isinstance(guild_channel, discord.VoiceChannel):
+                # No channel was given, attempt to find a channel named 'General'
+                if channel is None and guild_channel.name.lower() == 'general':
+                    channel = guild_channel
+                elif channel != guild_channel:
+                    other_channels.append(guild_channel)
+
+        # There is a possibility that we could not find the default 'general' channel
+        if channel is None:
+            await context.send("I couldn't find a voice channel named `general`! "
+                               "Please try again and specify an existing voice channel")
+            return
+
+        # Move all the users
+        for guild_channel in other_channels:
+            for member in guild_channel.members:
+                await member.move_to(channel)
+
+        await context.send('Done!')
+
+    return SalsaCommand(name='moveall', description='Move everyone to the specified voice channel', invoke_func=invoke)
+
+
+NICK_SET_PATTERN = re.compile(r"[nN][iI][cC][kK]\s+[sS][eE][tT]\s+(.+?)\s(.*)")
+
+
+def _nick_set():
+    async def invoke(context: CommandContext, member: discord.Member, nickname: str) -> None:
+        """
+        Args:
+            member: The Discord server member whose nickname should be updated
+            nickname: The new nickname
+        """
+        # Permission check
+        if not _has_boss_role(context.author):
+            await context.send("You don't have permission to use this command!")
+            return
+
+        if member == context.bot.user:
+            # Protect SalsaProvider from being nicknamed
+            await context.send("Hahaha nice try 😎")
+        else:
+            await member.edit(nick=nickname)
+            await context.send(f"I updated the nickname for {member.name} to {nickname}!")
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        match = NICK_SET_PATTERN.fullmatch(command_text)
+        if not match:
+            return None
+
+        return [match.group(1), match.group(2)]
+
+    return SalsaCommand(name='set', description='Nickname a server member',
+                        invoke_func=invoke, match_func=match)
+
+
+def _nick_clear():
+    async def invoke(context: CommandContext, member: discord.Member = None) -> None:
+        """
+        Args:
+            member: The Discord server member whose nickname should be cleared
+        """
+        # Permission check
+        if not _has_boss_role(context.author):
+            await context.send("You don't have permission to use this command!")
+            return
+
+        # If no member is specified, we shall use the member who is invoking the command
+        if member is None:
+            member = context.author
+
+        if member == context.bot.user:
+            # Protect SalsaProvider from being nicknamed
+            await context.send("This doesn't apply to me 😎")
+        else:
+            await member.edit(nick=None)
+            await context.send(f"I cleared the nickname for {member.name}!")
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        return await _default_match('nickclear', command_text)
+
+    return SalsaCommand(name='clear', description='Clear the nickname for a server member',
+                        invoke_func=invoke, match_func=match)
+
+
+def _flip_a_coin():
+    async def invoke(context: CommandContext) -> None:
+        await context.send(f'The result is: `{random.choice(["Heads", "Tails"])}`')
+
+    return SalsaCommand(name='flipacoin', description='Perform a coin flip', invoke_func=invoke)
+
+
+PICK_A_NUMBER_PATTERN = re.compile(r"pick\s*a\s*number\s+(-?\d+)\s*-\s*(-?\d+)")
+
+
+def _pick_a_number():
+    async def invoke(context: CommandContext, begin: int, end: int) -> None:
+        """
+        Args:
+            begin: The smallest possible number
+            end: The largest possible number
+        """
+        numbers = [begin, end]
+        if numbers[0] > numbers[1]:
+            numbers.reverse()
+
+        await context.send(f'I picked the number {random.randint(*numbers)}')
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        match = PICK_A_NUMBER_PATTERN.fullmatch(command_text)
+        if not match:
+            return None
+
+        return [match.group(1), match.group(2)]
+
+    return SalsaCommand(name='pickanumber', description='Pick a number from a range',
+                        invoke_func=invoke, match_func=match)
+
+
+CHOOSE_FROM_PATTERN = re.compile(r"(?i)choose\s*(\d*)\s*from\s*(.+)")
+
+
+def _choose_from():
+    async def invoke(context: CommandContext, options: str, count: int = 1) -> None:
+        """
+        Args:
+            options: A comma separated list of options to choose from. Ex. 'option 1, option 2, option 3'
+            count: How many of the options to pick
+        """
+        # Remove starting and ending brackets if present
+        if options[0] == '[' and options[-1] == ']':
+            options = options[1:-1]
+
+        # Convert the list of options into an actual python list and remove padding from each option
+        options_list = [option.strip() for option in options.split(',')]
+
+        if count == 0:
+            # Special message for choose 0
+            await context.send('Hmm... choose 0 you say? I think my work here is already done')
+        elif count > len(options_list):
+            # Message for asking to choose too many options
+            await context.send(f'How do you expect me to choose {count} given only {len(options_list)} '
+                               f'option{"s" if len(options_list) > 1 else ""}?!?! Try again please')
+        elif len(options_list) == 1:
+            # Special message for only one option
+            await context.send('You only gave me one option :( That\'s no fun')
+        elif count == len(options_list):
+            await context.send('You want ALL the options? You can have them ;)')
+        else:
+            # Make the choice(s)
+            choices = random.sample(options_list, count)
+
+            if len(choices) == 1:
+                await context.send(f'I chose `{choices[0]}`')
+            elif len(choices) == 2:
+                await context.send(f'I chose `{choices[0]}` and `{choices[1]}`')
+            else:
+                await context.send(f'I chose {", ".join(f"`{choice}`" for choice in choices[:-1])}, '
+                                   f'and `{choices[-1]}`')
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        match = CHOOSE_FROM_PATTERN.fullmatch(command_text)
+        if not match:
+            return None
+
+        # Extract the info we need from the command
+        count_text, options_list_text = match.group(1, 2)
+
+        return [options_list_text] + ([count_text] if count_text else [])
+
+    return SalsaCommand(name='choosefrom', description='Choose one or more options from a list',
+                        invoke_func=invoke, match_func=match)
+
+
+MAGIC_8_BALL_RESPONSES = ["It is certain", "It is decidedly so", "Without a doubt", "Yes - definitely",
+                          "You may rely on it", "As I see it, yes", "Most likely", "Outlook good", "Yes",
+                          "Signs point to yes", "Reply hazy, try again", "Ask again later", "Better not tell you now",
+                          "Cannot predict now", "Concentrate and ask again", "Don't count on it", "My reply is no",
+                          "My sources say no", "Outlook not so good", "Very doubtful"]
+MAGIC_8_BALL_RESPONSE_COUNT = len(MAGIC_8_BALL_RESPONSES)
+
+
+def _magic_8_ball():
+    async def invoke(context: CommandContext, question: str = None) -> None:
+        """
+        Args:
+            question: The question to ask the Magic 8 Ball
+        """
+        # Use the current random generator to pick a response
+        response_index = random.randint(0, MAGIC_8_BALL_RESPONSE_COUNT - 1)
+
+        # Allow the question to influence our result
+        if question is not None:
+            response_index += hash(question)
+            response_index %= MAGIC_8_BALL_RESPONSE_COUNT
+
+        await context.send(f'The Magic 8 Ball says: `{MAGIC_8_BALL_RESPONSES[response_index]}`')
+
+    return SalsaCommand(name='m8b', description='Ask the Magic 8 Ball a question', invoke_func=invoke)
+
+
+def _thanks():
+    async def invoke(context: CommandContext) -> None:
+        await context.send(ss.get_thank_you_reply(context.author))
+
+        if context.is_message():
+            await context.context.add_reaction("👍")
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        command_text_no_whitespace = command_text.replace(" ", "")
+        if any(text in command_text_no_whitespace for text in ("thankyou", "thanks", "thank", "ty", "thx")):
+            return []
+
+        return None
+
+    return SalsaCommand(name='thanksalsa', description='You will make me happy :)', invoke_func=invoke,
+                        match_func=match)
+
+
+def _help():
+    async def invoke(context: CommandContext) -> None:
+        await context.send("```SalsaProvider Commands:\n"
+                           "!salsa help - Display help information\n"
+                           "!salsa redo - Execute your previous command again\n"
+                           "!salsa flip a coin - Perform a coin flip\n"
+                           "!salsa pick a number <first#> - <second#> - Pick a number from a range\n"
+                           "!salsa m8b [question] - Magic 8 Ball, the question is optional\n"
+                           "!salsa choose [count] from <comma separated list of options> - "
+                           "Choose one or more options from a list\n"
+                           "Requires 'Big Boss Role':\n"
+                           "!salsa moveall <voice_channel> - Move everyone to the specified voice channel \n"
+                           "!salsa nick set <Username> <Nickname> - Nickname a user\n"
+                           "!salsa nick clear [Username] - Clear the nickname for a user```\n")
+
+    async def match(command_text: str) -> Optional[List[str]]:
+        if not command_text:
+            return []
+
+        return await _default_match('help', command_text)
+
+    return SalsaCommand(name='help', description='Display text command help information', invoke_func=invoke,
+                        match_func=match)
+
+
+def _sync():
+    async def invoke(context: CommandContext) -> None:
+        if await context.bot.is_owner(context.author):
+            print('Syncing commands!')
+            await context.bot.tree.sync(guild=None)  # context.bot.get_the_tunnel())
+            await context.bot.tree.sync(guild=context.bot.get_the_tunnel())
+            await context.send('Sync successful!')
+        else:
+            await context.send('Only the bot owner is allowed to run this command!')
+
+    return SalsaCommand(name='sync', description='Sync the bot commands to Discord', invoke_func=invoke)
+
+
+# Constants containing the command objects in the correct processing order
+JUGGLE_COMMAND = _juggle()
+SLASH_COMMANDS = (RedoCommand(), _choose_from(), _flip_a_coin(), _magic_8_ball(), _pick_a_number(), _move_all(),
+                  JUGGLE_COMMAND, _seen(), _thanks(), _help())
+NICK_COMMANDS = (_nick_set(), _nick_clear())
+TEXT_COMMANDS = (_sync(),) + SLASH_COMMANDS + NICK_COMMANDS
+
+
+def load_app_commands(bot: SalsaClient):
+    def create_cb(_command):
+        async def new_cb(interaction: discord.Interaction, *args, **kwargs) -> None:
+            await _command.invoke(CommandContext(bot, interaction), *args, **kwargs)
+
+        # Copy over the function signature so that parameters are registered correctly
+        cb_signature = [inspect.Parameter('interaction', inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                          annotation=discord.Interaction)] + _command.get_parameters()
+        new_cb.__signature__ = inspect.Signature(cb_signature)
+
+        # Copy over the doc string so that parameter descriptions are registered correctly
+        new_cb.__doc__ = _command.get_docs()
+
+        return new_cb
+
+    for command in SLASH_COMMANDS:
+        bot.tree.add_command(app_commands.Command(name=command.name, description=command.description,
+                                                  callback=create_cb(command)))
+
+    # These commands are special and need to be put in a group together
+    nick_group = app_commands.Group(name='nick', description='Manage nicknames for server members')
+    for command in NICK_COMMANDS:
+        nick_group.add_command(app_commands.Command(name=command.name, description=command.description,
+                                                    callback=create_cb(command)))
+    bot.tree.add_command(nick_group)
+
+    # Also add nick clear and juggle as context menu commands for bonus points
+    nick_clear = NICK_COMMANDS[1]
+    bot.tree.add_command(app_commands.ContextMenu(name='Clear Nickname', callback=create_cb(nick_clear)))
+    bot.tree.add_command(app_commands.ContextMenu(name='Juggle', callback=create_cb(JUGGLE_COMMAND)))
 
 
 def get_member_by_username(client, username):
@@ -159,187 +620,100 @@ def get_member_by_username(client, username):
     return user
 
 
-async def _nick(client, message, args, args_lower):
-    match = NICKNAME_PATTERN.fullmatch(args)
-    if not match:
-        return False
+def _get_voice_channel_helper(bot: 'SalsaClient', name_or_id: str) -> Optional[discord.VoiceChannel]:
+    # Grab the last part of the channel link, where the channel ID is
+    count = 0
+    all_numbers = True
+    for count, character in enumerate(reversed(name_or_id)):
+        if not ord('0') <= ord(character) <= ord('9'):
+            all_numbers = False
+            break
 
-    if not _has_boss_role(message.author):
-        await message.channel.send("You can't use this command here!")
-        return True
-
-    user = get_member_by_username(client, match.group(1))
-
-    if user is None:
-        await message.channel.send(f"I don't know who `{match.group(1)}` is. Please try again")
-    elif user == client.user:
-        # Protect SalsaProvider from being nicknamed
-        await message.channel.send("Hahaha nice try 😎")
-    else:
-        await user.edit(nick=match.group(2))
-
-    return True
-
-
-async def _clear_nick(client, message, args, args_lower):
-    args_parts = args.split()
-    if len(args_parts) < 2 or args_parts[0].lower() != 'clear' or args_parts[1].lower() != 'nick':
-        return False
-
-    if not _has_boss_role(message.author):
-        await message.channel.send("You can't use this command here!")
-        return True
-
-    if len(args_parts) == 2:
-        user = message.author
-    else:
-        user = get_member_by_username(client, args_parts[2])
-
-    if user is None:
-        await message.channel.send(f"I don't know who `{args_parts[2]}` is. Please try again")
-    elif user == client.user:
-        # Protect SalsaProvider from being nicknamed
-        await message.channel.send("This doesn't apply to me 😎")
-    else:
-        await user.edit(nick=None)
-
-    return True
-
-
-async def _move_everyone_to_channel(command_name, target_channel_name, client, message, args, args_lower):
-    if args_lower != command_name:
-        return False
-
-    if _has_boss_role(message.author):
-        target_channel = client.get_channel(ss.VOICE_CHANNEL_IDS[target_channel_name])
-        other_channels = [client.get_channel(ss.VOICE_CHANNEL_IDS[name]) for name in
-                          ss.VOICE_CHANNEL_IDS if name != target_channel_name]
-
-        move_operations = []
-        for channel in other_channels:
-            for member in channel.members:
-                move_operations.append(member.move_to(target_channel))
-
-        await asyncio.gather(*move_operations)
-    else:
-        await message.channel.send("You can't use this command here!")
-
-    return True
-
-
-PICK_A_NUMBER_PATTERN = re.compile(r"pick\s*a\s*number\s+(-?\d+)\s*-\s*(-?\d+)")
-
-
-async def _pick_a_number(client, message, args, args_lower):
-    match = PICK_A_NUMBER_PATTERN.fullmatch(args_lower)
-    if not match:
-        return False
-
+    id_text = name_or_id if all_numbers else name_or_id[-count:]
     try:
-        numbers = [int(match.group(1)), int(match.group(2))]
-        if numbers[0] > numbers[1]:
-            numbers.reverse()
-
-        await message.channel.send(f'I picked the number {random.randint(*numbers)}')
+        # We will first try to parse this text as a channel ID or channel link
+        channel_id = int(id_text)
+        for channel in bot.get_the_tunnel().channels:
+            if isinstance(channel, discord.VoiceChannel) and channel.id == channel_id:
+                return channel
     except ValueError:
-        await message.channel.send('Your numbers are garbage!! (Try again, with formatting like this: `1-10`)')
+        pass
 
-    return True
+    # If we make it here, we could not parse the text as a channel ID or link. Try searching by name
+    for channel in bot.get_the_tunnel().channels:
+        if isinstance(channel, discord.VoiceChannel) and channel.name == name_or_id:
+            return channel
+
+    # Could not find the channel
+    return None
 
 
-CHOOSE_FROM_PATTERN = re.compile(r"(?i)choose\s*(\d*)\s*from\s*(.+)")
+class ConversionError(ValueError):
+    pass
 
 
-async def _choose_from(client, message, args, args_lower):
-    match = CHOOSE_FROM_PATTERN.fullmatch(args)
-    if not match:
-        return False
-
-    # Extract the info we need from the command
-    count_text, options_list_text = match.group(1, 2)
-
-    try:
-        # If a count was not provided, default to 1
-        count = 1 if count_text == "" else int(count_text)
-
-        # Remove starting and ending brackets if present
-        if options_list_text[0] == '[' and options_list_text[-1] == ']':
-            options_list_text = options_list_text[1:-1]
-
-        # Convert the list of options into an actual python list and remove padding from each option
-        options_list = [option.strip() for option in options_list_text.split(',')]
-
-        if count == 0:
-            # Special message for choose 0
-            await message.channel.send('Hmm... choose 0 you say? I think my work here is already done')
-        elif count > len(options_list):
-            # Message for asking to choose too many options
-            await message.channel.send(f'How do you expect me to choose {count} given only {len(options_list)} '
-                                       f'option{"s" if len(options_list) > 1 else ""}?!?! Try again please')
-        elif len(options_list) == 1:
-            # Special message for only one option
-            await message.channel.send('You only gave me one option :( That\'s no fun')
-        elif count == len(options_list):
-            await message.channel.send('You want ALL the options? You can have them ;)')
-        else:
-            # Make the choice(s)
-            choices = random.sample(options_list, count)
-
-            if len(choices) == 1:
-                await message.channel.send(f'I chose `{choices[0]}`')
-            elif len(choices) == 2:
-                await message.channel.send(f'I chose `{choices[0]}` and `{choices[1]}`')
+# TODO Add an insult instead of sorry when conversion fails
+def convert_args(bot: SalsaClient, args: List[str], types: List[Type]) -> List[Any]:
+    converted_args = []
+    for index, (arg, arg_type) in enumerate(zip(args, types), 1):
+        if arg_type == str:
+            # Remove quotes if they are present at the beginning and end of the string
+            if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] in ('"', '\''):
+                converted_args.append(arg[1:-1])
             else:
-                await message.channel.send(f'I chose {", ".join(f"`{choice}`" for choice in choices[:-1])}, '
-                                           f'and `{choices[-1]}`')
+                # Hahaha, that was easy!
+                converted_args.append(arg)
+        elif arg_type == int:
+            try:
+                converted_args.append(int(arg))
+            except ValueError:
+                raise ConversionError(f'Error: I was expecting a number, but you gave me `{arg}` at position {index}. '
+                                      f'Sorry, please try again :smiling_face_with_tear:')
+        elif arg_type == discord.Member:
+            member = get_member_by_username(bot, arg)
+            if member is None:
+                raise ConversionError(f"Error: I can't find a Discord member with nickname, username, or ID matching "
+                                      f'`{arg}`, as you gave me at position {index}. '
+                                      f'Sorry, please try again :smiling_face_with_tear:')
 
-    except ValueError:
-        await message.channel.send('Your numbers are garbage!! '
-                                   '(Not sure how you broke this, but you probably know what\'s wrong already)')
+            converted_args.append(member)
+        elif arg_type == discord.VoiceChannel:
+            channel = _get_voice_channel_helper(bot, arg)
+            if channel is None:
+                raise ConversionError(f"Error: I can't find a voice channel with ID, link, or name matching "
+                                      f'`{arg}`, as you gave me at position {index}. '
+                                      f'Sorry, please try again :smiling_face_with_tear:')
+        else:
+            raise ConversionError(f'The bozo who developed this bot did not implement this command correctly! '
+                                  f'Please yell at them! Info: index=`{index}`, arg=`{arg}`, arg_type=`{arg_type}`')
 
-    return True
+    return converted_args
 
 
-MAGIC_8_BALL_RESPONSES = ["It is certain", "It is decidedly so", "Without a doubt", "Yes - definitely",
-                          "You may rely on it", "As I see it, yes", "Most likely", "Outlook good", "Yes",
-                          "Signs point to yes", "Reply hazy, try again", "Ask again later", "Better not tell you now",
-                          "Cannot predict now", "Concentrate and ask again", "Don't count on it", "My reply is no",
-                          "My sources say no", "Outlook not so good", "Very doubtful"]
-MAGIC_8_BALL_RESPONSE_COUNT = len(MAGIC_8_BALL_RESPONSES)
-
-
-async def _magic_8_ball(client, message, args, args_lower):
-    if not args_lower.startswith("m8b"):
+async def handle(bot: SalsaClient, message: discord.Message):
+    # See if the message starts with !salsa
+    match = BOT_COMMAND_PATTERN.fullmatch(message.content)
+    if not match:
         return False
 
-    # Use the current random generator to pick a response
-    response_index = random.randint(0, MAGIC_8_BALL_RESPONSE_COUNT - 1)
+    # Attempt to match the command text and then invoke the correct command
+    command_text = match.group(1)
+    for command in TEXT_COMMANDS:
+        args = await command.match(command_text)
+        if args is not None:
+            types = [parameter.annotation for parameter in command.get_parameters()]
+            context = CommandContext(bot, message)
 
-    # Allow the question to influence our result
-    question = args[3:].strip()
-    if question:
-        response_index += hash(question)
-        response_index %= MAGIC_8_BALL_RESPONSE_COUNT
+            # Attempt to convert the str args of the command to the appropriate types and then invoke the command.
+            # If there is a conversion error we will print the message to the user and then gracefully exit
+            try:
+                converted_args = convert_args(bot, args, types)
+                await command.invoke(context, *converted_args)
+            except ConversionError as error:
+                await context.send(error)
 
-    await message.channel.send(f'The Magic 8 Ball says: `{MAGIC_8_BALL_RESPONSES[response_index]}`')
+            return True
+
+    # Unknown command
+    await message.channel.send(f'Unknown command: `{command_text}`. Try `!salsa` for help!')
     return True
-
-
-async def _thanks(client, message, args, args_lower):
-    if args_lower.replace(" ", "") not in ("thankyou", "thanks", "thank", "ty", "thx"):
-        return False
-
-    await message.channel.send(ss.get_thank_you_reply(message.author))
-    await message.add_reaction("👍")
-    return True
-
-
-async def _insults(client, message, args, args_lower):
-    return False
-    # if args_lower != "test":
-    #     return False
-    #
-    # await message.channel.send("This is a test!")
-    # await message.channel.send(ss.SALSA_IMAGES[0])
-    #
-    # return True
