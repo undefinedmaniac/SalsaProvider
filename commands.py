@@ -3,7 +3,7 @@ import re
 import random
 import inspect
 import asyncio
-from typing import Union, List, Optional, Callable, Awaitable, Any, Type
+from typing import Union, List, Optional, Callable, Awaitable, Any, Type, Iterable
 
 import discord
 from discord import app_commands
@@ -12,6 +12,7 @@ import fridge
 import salsa_settings as ss
 from functools import partial
 
+import utilities
 from fridge import UserStatus, VoiceStatus
 from main import SalsaClient
 
@@ -19,12 +20,39 @@ from main import SalsaClient
 last_command = {}
 
 BOT_COMMAND_PATTERN = re.compile(r"(?i)^!salsa\s*(.*?)\s*$")
+COMMAND_CHANNEL_NAME = 'spam'
+
+
+def get_command_channel(bot: SalsaClient) -> discord.TextChannel:
+    for channel in bot.get_the_tunnel().channels:
+        if isinstance(channel, discord.TextChannel) and channel.name == COMMAND_CHANNEL_NAME:
+            return channel
+
+
+def args_to_text(args: Iterable[Any]) -> str:
+    text_args = []
+    for arg in args:
+        if isinstance(arg, (str, int)):
+            text_args.append(str(arg))
+        elif isinstance(arg, (discord.User, discord.Member)):
+            text_args.append(arg.display_name)
+        elif isinstance(arg, discord.VoiceChannel):
+            text_args.append(arg.name)
+
+    return " ".join(f'"{arg}"' for arg in text_args)
+
+
+def _error(message: str):
+    embed = discord.Embed(title=':warning: Command Error', description=message,
+                          color=discord.Color.dark_red())
+    return embed
 
 
 class CommandContext:
     def __init__(self, bot: SalsaClient, context: Union[discord.Message, discord.Interaction]):
         self.context = context
         self.bot = bot
+        self._responded = False
 
         # Setup send() function to use the correct underlying f() call
         if self.is_message():
@@ -34,22 +62,49 @@ class CommandContext:
             self._send = self.context.response.send_message
             self.author = self.context.user
 
+    async def prepare(self, command_name: str, *args, **kwargs):
+        if self.is_context_menu():
+            await self.context.response.send_message(f'Redirecting to command channel!', ephemeral=True, delete_after=3)
+            command_channel = get_command_channel(self.bot)
+            self._send = command_channel.send
+            text_args = args_to_text(args + tuple(kwargs.values()))
+            if text_args:
+                text_args = ' ' + text_args
+            await command_channel.send(f'{self.author.display_name} executed `/{command_name}{text_args}`')
+
+    async def finish(self):
+        if not self._responded:
+            if self.is_slash_command():
+                await self.send('Done!')
+            elif self.is_message():
+                await self.context.add_reaction('👍')
+
     async def send(self, *args, **kwargs):
+        self._responded = True
         await self._send(*args, **kwargs)
-        if not self.is_message():
+        if self.is_slash_command():
             self._send = self.context.followup.send
 
-    async def defer(self):
-        if not self.is_message():
-            await self.context.response.defer()
+    async def defer(self, *args, **kwargs):
+        if self.is_slash_command() and not self._responded:
+            await self.context.response.defer(*args, **kwargs)
             self._send = self.context.followup.send
 
     def is_message(self):
         return isinstance(self.context, discord.Message)
 
+    def is_interaction(self):
+        return isinstance(self.context, discord.Interaction)
+
+    def is_slash_command(self):
+        return self.is_interaction() and isinstance(self.context.command, app_commands.Command)
+
+    def is_context_menu(self):
+        return self.is_interaction() and isinstance(self.context.command, app_commands.ContextMenu)
+
 
 async def _default_match(command_name: str, command_text: str) -> Optional[List[str]]:
-    text_parts = command_text.split()
+    text_parts = utilities.split_respect_quotes(command_text)
 
     length = 0
     for index, part in enumerate(text_parts):
@@ -83,7 +138,6 @@ async def _have_salsa_instead(context: CommandContext):
         return False
 
     await context.send("Instead of that, have some salsa! :)")
-    # TODO remove this extra check once we upgrade to discord.py v2.1
     if random.random() < ss.MESS_UP_AND_GIVE_SHRIMP_PROBABILITY and context.is_message():
         # Mess up and give them shrimp first
         await context.send(random.choice(ss.SHRIMP_IMAGES), delete_after=8)
@@ -98,11 +152,12 @@ async def _have_salsa_instead(context: CommandContext):
 class SalsaCommand:
     def __init__(self, name: str, description: str,
                  invoke_func: Callable[[CommandContext, ...], Awaitable[None]],
-                 match_func: Callable[[str], Awaitable[Optional[List[str]]]] = None):
+                 match_func: Callable[[str], Awaitable[Optional[List[str]]]] = None, *, display_name: str = None):
         self.name = name
         self.description = description
         self._invoke = invoke_func
         self.match = partial(_default_match, name) if match_func is None else match_func
+        self.display_name = name if display_name is None else display_name
 
     # Returns the parameters to the command. When calling self.invoke(), the inputs should be
     # 1. A CommandContext object and 2. a list of parameters corresponding to the ones returned by this method
@@ -137,9 +192,17 @@ class RedoCommand(SalsaCommand):
     async def invoke(self, context: CommandContext, *args, **kwargs) -> None:
         command_info = last_command.get(context.author.id)
         if command_info is None:
-            await context.send('If you\'ve used a command previously, I can\'t remember what it was. Sorry :(')
+            await context.send(embed=_error('If you\'ve used a command previously, '
+                                            'I can\'t remember what it was. Sorry :('))
         else:
-            await command_info[0].invoke(context, *command_info[1], **command_info[2])
+            command = command_info[0]
+            args = command_info[1]
+            kwargs = command_info[2]
+            text_args = args_to_text(args + tuple(kwargs.values()))
+            if text_args:
+                text_args = ' ' + text_args
+            await context.send(f'Executing `/{command.display_name}{text_args}`')
+            await command.invoke(context, *args, **kwargs)
 
 
 def _seen():
@@ -150,7 +213,7 @@ def _seen():
         """
         # Permission check
         if not _has_boss_role(context.author):
-            await context.send("You don't have permission to use this command!")
+            await context.send(embed=_error("You don't have permission to use this command!"))
             return
 
         if member == context.bot.user:
@@ -188,9 +251,9 @@ def _seen():
             last_active_timestamp = last_activity[1] + last_activity[2]
             description = last_active_timestamp.strftime(
                 f'{member.name} was last seen on %A, %B %d, %Y (%m/%d/%y) at %I:%M %p (%H:%M). They have been Offline '
-                f'for {round((current_timestamp-last_active_timestamp)/datetime.timedelta(minutes=1))} minutes')
+                f'for {round((current_timestamp - last_active_timestamp) / datetime.timedelta(minutes=1))} minutes')
             last_known_status = f'{get_color_circle(last_activity[0])} {last_activity[0]} for ' \
-                                f'{last_activity[2].days*24*60 + round(last_activity[2].seconds/60)} minutes'
+                                f'{last_activity[2].days * 24 * 60 + round(last_activity[2].seconds / 60)} minutes'
 
         title_insert = member.name if member.name == member.display_name else f'{member.name} ({member.display_name})'
         embed = discord.Embed(title=f'When Was {title_insert} Last Seen?',
@@ -217,24 +280,14 @@ def _seen():
             value = last_active_timestamp.strftime(
                 f'{member.name} was last seen in VC on %A, %B %d, %Y (%m/%d/%y) at %I:%M %p (%H:%M). They have been '
                 f'Disconnected for '
-                f'{round((current_timestamp-last_active_timestamp)/datetime.timedelta(minutes=1))} minutes')
+                f'{round((current_timestamp - last_active_timestamp) / datetime.timedelta(minutes=1))} minutes')
             last_vc_status = f'{last_vc_activity[0]} for ' \
-                             f'{last_vc_activity[2].days*24*60 + round(last_vc_activity[2].seconds/60)} minutes'
+                             f'{last_vc_activity[2].days * 24 * 60 + round(last_vc_activity[2].seconds / 60)} minutes'
 
         embed.add_field(name='Last VC Activity', value=value, inline=False)
         embed.add_field(name='Last VC Status', value=last_vc_status, inline=False)
 
         await context.send(embed=embed)
-
-        # embed = discord.Embed(title='This is the Title', description='This is the description',
-        #                       color=discord.Color.dark_red())
-        # embed.add_field(name='Field 1', value='Value 1', inline=True)
-        # embed.add_field(name='Field 2', value='Value 2', inline=True)
-        # embed.add_field(name='Field 3', value='Value 3', inline=True)
-        #
-        # embed.add_field(name='Non-Inline Field', value='Non-Inline Value')
-        #
-        # await context.send(embed=embed)
 
     return SalsaCommand(name='seen', description='Display information about when a member was last seen',
                         invoke_func=invoke)
@@ -248,7 +301,7 @@ def _juggle():
         """
         # Permission check
         if not _has_boss_role(context.author):
-            await context.send("You don't have permission to use this command!")
+            await context.send(embed=_error("You don't have permission to use this command!"))
             return
 
         if member == context.bot.user:
@@ -258,7 +311,8 @@ def _juggle():
         if member.voice is not None and isinstance(member.voice.channel, discord.VoiceChannel):
             current_channel = member.voice.channel
             if current_channel.guild != context.bot.get_the_tunnel():
-                await context.send(f'I can only juggle people who are in {context.bot.get_the_tunnel().name}!')
+                await context.send(embed=_error(f'I can only juggle people who are '
+                                                f'in {context.bot.get_the_tunnel().name}!'))
                 return
 
             voice_channels = [channel for channel in context.bot.get_the_tunnel().channels if
@@ -288,10 +342,8 @@ def _juggle():
                 await member.move_to(current_channel)
             except Exception:
                 pass
-
-            await context.send('Done!')
         else:
-            await context.send(f'{member.name} is not connected to a voice channel!')
+            await context.send(embed=_error(f'{member.name} is not connected to a voice channel!'))
 
     return SalsaCommand(name='juggle', description='Move someone around a bit', invoke_func=invoke)
 
@@ -304,7 +356,7 @@ def _move_all():
         """
         # Permission check
         if not _has_boss_role(context.author):
-            await context.send("You don't have permission to use this command!")
+            await context.send(embed=_error("You don't have permission to use this command!"))
             return
 
         # Fetch the list of voice channels so that we can move users who are in these channels to the target channel
@@ -319,16 +371,17 @@ def _move_all():
 
         # There is a possibility that we could not find the default 'general' channel
         if channel is None:
-            await context.send("I couldn't find a voice channel named `general`! "
-                               "Please try again and specify an existing voice channel")
+            await context.send(embed=_error("I couldn't find a voice channel named `general`! "
+                                            "Please try again and specify an existing voice channel"))
             return
+
+        # It will take a little time to move the users
+        await context.defer()
 
         # Move all the users
         for guild_channel in other_channels:
             for member in guild_channel.members:
                 await member.move_to(channel)
-
-        await context.send('Done!')
 
     return SalsaCommand(name='moveall', description='Move everyone to the specified voice channel', invoke_func=invoke)
 
@@ -345,7 +398,7 @@ def _nick_set():
         """
         # Permission check
         if not _has_boss_role(context.author):
-            await context.send("You don't have permission to use this command!")
+            await context.send(embed=_error("You don't have permission to use this command!"))
             return
 
         if member == context.bot.user:
@@ -374,7 +427,7 @@ def _nick_clear():
         """
         # Permission check
         if not _has_boss_role(context.author):
-            await context.send("You don't have permission to use this command!")
+            await context.send(embed=_error("You don't have permission to use this command!"))
             return
 
         # If no member is specified, we shall use the member who is invoking the command
@@ -386,13 +439,12 @@ def _nick_clear():
             await context.send("This doesn't apply to me 😎")
         else:
             await member.edit(nick=None)
-            await context.send(f"I cleared the nickname for {member.name}!")
 
     async def match(command_text: str) -> Optional[List[str]]:
         return await _default_match('nickclear', command_text)
 
     return SalsaCommand(name='clear', description='Clear the nickname for a server member',
-                        invoke_func=invoke, match_func=match)
+                        display_name='nick clear', invoke_func=invoke, match_func=match)
 
 
 def _flip_a_coin():
@@ -562,7 +614,7 @@ def _sync():
             await context.bot.tree.sync(guild=context.bot.get_the_tunnel())
             await context.send('Sync successful!')
         else:
-            await context.send('Only the bot owner is allowed to run this command!')
+            await context.send(embed=_error('Only the bot owner is allowed to run this command!'))
 
     return SalsaCommand(name='sync', description='Sync the bot commands to Discord', invoke_func=invoke)
 
@@ -578,7 +630,10 @@ TEXT_COMMANDS = (_sync(),) + SLASH_COMMANDS + NICK_COMMANDS
 def load_app_commands(bot: SalsaClient):
     def create_cb(_command):
         async def new_cb(interaction: discord.Interaction, *args, **kwargs) -> None:
-            await _command.invoke(CommandContext(bot, interaction), *args, **kwargs)
+            context = CommandContext(bot, interaction)
+            await context.prepare(_command.display_name, *args, **kwargs)
+            await _command.invoke(context, *args, **kwargs)
+            await context.finish()
 
         # Copy over the function signature so that parameters are registered correctly
         cb_signature = [inspect.Parameter('interaction', inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -657,22 +712,18 @@ def convert_args(bot: SalsaClient, args: List[str], types: List[Type]) -> List[A
     converted_args = []
     for index, (arg, arg_type) in enumerate(zip(args, types), 1):
         if arg_type == str:
-            # Remove quotes if they are present at the beginning and end of the string
-            if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] in ('"', '\''):
-                converted_args.append(arg[1:-1])
-            else:
-                # Hahaha, that was easy!
-                converted_args.append(arg)
+            # Hahaha, that was easy!
+            converted_args.append(arg)
         elif arg_type == int:
             try:
                 converted_args.append(int(arg))
             except ValueError:
-                raise ConversionError(f'Error: I was expecting a number, but you gave me `{arg}` at position {index}. '
+                raise ConversionError(f'I was expecting a number, but you gave me `{arg}` at position {index}. '
                                       f'Sorry, please try again :smiling_face_with_tear:')
         elif arg_type == discord.Member:
             member = get_member_by_username(bot, arg)
             if member is None:
-                raise ConversionError(f"Error: I can't find a Discord member with nickname, username, or ID matching "
+                raise ConversionError(f"I can't find a Discord member with nickname, username, or ID matching "
                                       f'`{arg}`, as you gave me at position {index}. '
                                       f'Sorry, please try again :smiling_face_with_tear:')
 
@@ -680,9 +731,10 @@ def convert_args(bot: SalsaClient, args: List[str], types: List[Type]) -> List[A
         elif arg_type == discord.VoiceChannel:
             channel = _get_voice_channel_helper(bot, arg)
             if channel is None:
-                raise ConversionError(f"Error: I can't find a voice channel with ID, link, or name matching "
+                raise ConversionError(f"I can't find a voice channel with ID, link, or name matching "
                                       f'`{arg}`, as you gave me at position {index}. '
                                       f'Sorry, please try again :smiling_face_with_tear:')
+            converted_args.append(channel)
         else:
             raise ConversionError(f'The bozo who developed this bot did not implement this command correctly! '
                                   f'Please yell at them! Info: index=`{index}`, arg=`{arg}`, arg_type=`{arg_type}`')
@@ -708,9 +760,15 @@ async def handle(bot: SalsaClient, message: discord.Message):
             # If there is a conversion error we will print the message to the user and then gracefully exit
             try:
                 converted_args = convert_args(bot, args, types)
+                await context.prepare(command.name, *converted_args)
                 await command.invoke(context, *converted_args)
             except ConversionError as error:
-                await context.send(error)
+                await context.send(embed=_error(str(error)))
+            except TypeError:
+                await context.send(embed=_error("You didn't provide enough information! "
+                                                "This command requires more parameters"))
+            finally:
+                await context.finish()
 
             return True
 

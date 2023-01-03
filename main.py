@@ -28,7 +28,8 @@ from typing_insulter import TypingInsulter
 # 9. Valentines day (February 14th)
 # 10. 4th of July
 # 11. Easter
-# 12. ToDo list / Reminders
+# 12. Lock off
+# 13. ToDo list / Reminders
 
 
 class SalsaClient(discord.ext.commands.Bot):

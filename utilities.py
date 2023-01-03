@@ -1,4 +1,6 @@
 import heapq
+from typing import List, Optional, Tuple
+
 import fridge
 import asyncio
 import discord
@@ -98,6 +100,117 @@ def convert_user_status(status: discord.Status) -> fridge.UserStatus:
         return fridge.UserStatus.DoNotDisturb
 
     return fridge.UserStatus.Offline
+
+
+split_respect_quotes_cache: Optional[Tuple[str, List[str]]] = None
+
+
+def split_respect_quotes(text: str) -> List[str]:
+    # Caching because this function is often called repeatedly with the same value
+    global split_respect_quotes_cache
+    if split_respect_quotes_cache is not None and split_respect_quotes_cache[0] == text:
+        return split_respect_quotes_cache[1]
+
+    quote_indexes = []
+    skipped_sections = []
+
+    # Start by finding the locations of all escaped characters, whitespace, and potential grouping quotes
+    start = 0
+    backslash = False
+    whitespace = False
+    for stop, character in enumerate(text):
+        if backslash:
+            if character in ('\\', '"', '\''):
+                skipped_sections.append((stop-1, stop, False))
+            backslash = False
+        elif character == '\\':
+            backslash = True
+        elif character in ('"', '\''):
+            quote_indexes.append(stop)
+
+        if whitespace ^ (character in (' ', '\t')):
+            if whitespace:
+                skipped_sections.append((start, stop, True))
+            else:
+                start = stop
+            whitespace = not whitespace
+
+    if whitespace:
+        skipped_sections.append((start, len(text), True))
+
+    # Figure out which grouping quotes are 'real' and which ones should be interpreted as literal quotes
+    grouping_quotes = []
+    quote = 0
+    while quote < len(quote_indexes):
+        found = False
+        for search in range(quote+1, len(quote_indexes)):
+            if text[quote_indexes[quote]] == text[quote_indexes[search]]:
+                grouping_quotes.append((quote_indexes[quote], quote_indexes[search]))
+                quote = search + 1
+                found = True
+                break
+
+        if not found:
+            quote += 1
+
+    # Insert the grouping quotes into the skipped_sections, as we do not want grouping quotes included in output
+    index = 0
+    for quote in (quote for quote_pair in grouping_quotes for quote in quote_pair):
+        while index < len(skipped_sections) and skipped_sections[index][0] < quote:
+            index += 1
+
+        skipped_sections.insert(index, (quote, quote+1, False))
+
+    # Checks if we are inside grouping quotes and the skip should not be applied if it is whitespace
+    def inside_grouping_quotes(_skip_start):
+        while grouping_quotes:
+            quote_start, quote_stop = grouping_quotes[0]
+            if quote_stop < _skip_start:
+                del grouping_quotes[0]
+            else:
+                return quote_start < _skip_start < quote_stop
+
+    result = []
+    parts = []
+    start = 0
+
+    # Chop up the original string using slicing and piece together the parts we need to form the result strings
+    for skip_start, skip_stop, whitespace in skipped_sections:
+        if whitespace and inside_grouping_quotes(skip_start):
+            continue
+
+        parts.append(text[start:skip_start])
+
+        if whitespace:
+            result.append(''.join(parts))
+            parts = []
+
+        start = skip_stop
+
+    parts.append(text[start:])
+    result.append(''.join(parts))
+
+    # Filter out empty strings from the results and return finally
+    split_respect_quotes_cache = (text, [split_text for split_text in result if split_text])
+    return split_respect_quotes_cache[1]
+
+
+def cvt_escaped_str_to_literal(text: str) -> str:
+    temp = []
+
+    start = 0
+    backslash = False
+    for stop, character in enumerate(text):
+        if backslash:
+            if character in ('\\', '"', '\''):
+                temp.append(text[start:stop-1])
+                start = stop
+
+            backslash = False
+        elif character == '\\':
+            backslash = True
+
+    return ''.join(temp + [text[start:]])
 
 
 class LongTermTask:
