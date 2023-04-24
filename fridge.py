@@ -67,6 +67,22 @@ class VoiceStatus(IntEnum):
         return self.name
 
 
+class UserActivitySummary:
+    def __init__(self, start: datetime, stop: datetime):
+        self.start = start
+        self.stop = stop
+        self.sum: Dict[UserStatus, timedelta] = {}
+
+    def get_sum_avg_and_pc_percentage(self, status: UserStatus, period: timedelta = timedelta(days=1)) \
+            -> Tuple[timedelta, timedelta, float]:
+        pc_sum = self.sum[user_status_adjust_mobile(status, False)]
+        mobile_sum = self.sum[user_status_adjust_mobile(status, True)]
+        combined_sum = pc_sum + mobile_sum
+        number_of_periods = (self.stop - self.start) / period
+
+        return combined_sum, combined_sum / number_of_periods, pc_sum / combined_sum
+
+
 ACCEPTABLE_DOWNTIME = timedelta(minutes=10)
 
 
@@ -138,6 +154,9 @@ class Fridge:
         activity_info = self._connection.execute('SELECT status, start, duration FROM UserActivityView '
                                                  'WHERE id=? ORDER BY start DESC LIMIT 1', (user_id,)).fetchone()
         return activity_info
+
+    def get_user_activity_summary(self, user_id: int, start: datetime = datetime.min, stop: datetime = datetime.max):
+        pass
 
     # Initialize logging of voice activity (e.g. Unaccompanied, Accompanied, AFK, Disconnected)
     # active_users must be an up-to-date list of the {user_id,status} of non-disconnected users

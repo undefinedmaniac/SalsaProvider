@@ -17,6 +17,7 @@ import utilities
 from typing_tracker import TypingTracker
 from typing_insulter import TypingInsulter
 
+
 # 1. Christmas Eve is always the 24th of December
 # 2. Christmas is always the 25th of December
 # 3. Thanksgiving is the 4th Thursday of November
@@ -50,6 +51,9 @@ class SalsaClient(discord.ext.commands.Bot):
         self._long_term_scheduler = utilities.LongTermScheduler()
         self._has_run_scheduler = False
         self._update_connected_task = None
+
+        # Used to track do not disturb and invisible users
+        self._quiet_users = set()
 
     def get_the_tunnel(self) -> discord.Guild:
         return self.get_guild(ss.THE_TUNNEL_ID)
@@ -119,6 +123,10 @@ class SalsaClient(discord.ext.commands.Bot):
 
     async def on_ready_or_resume(self):
         print(f'Ready or Resume. {datetime.now()}')
+
+        # Reset quiet users
+        self._quiet_users.clear()
+
         # Fill the fridge with the currently active members
         active_users = {}
         for member in self.get_the_tunnel().members:
@@ -130,6 +138,10 @@ class SalsaClient(discord.ext.commands.Bot):
             if status != discord.Status.offline:
                 active_users[member.id] = fridge.user_status_adjust_mobile(utilities.convert_user_status(status),
                                                                            member.is_on_mobile())
+
+            # Fill quiet users
+            self._quiet_users_update(member)
+
         self._fridge.user_activity_init(active_users)
 
         # Fill the fridge with the members who are currently in VC
@@ -188,10 +200,31 @@ class SalsaClient(discord.ext.commands.Bot):
         if ss.SHOW_SHRIMP_SUPPORT and reaction.emoji == "🦐":
             await reaction.message.add_reaction("🦐")
 
+    async def deafen_quiet_user(self, member, voice_state, general_channel):
+        # Deafen people who are using the status incorrectly
+        if voice_state.channel is not None and not voice_state.deaf and member.id in self._quiet_users:
+            await member.edit(deafen=True)
+
+            status_text = 'Do Not Distrub' if member.status == discord.Status.dnd else 'Invisible'
+            message = f"The user {member.display_name} has their status set to `{status_text}`! Please do not bother " \
+                      f"them! They will be automatically deafened until their status has changed :grin:"
+            content = discord.Embed(title=':exclamation: Invalid Status Detected!', description=message,
+                                    color=discord.Color.dark_red())
+            await general_channel.send(embed=content, delete_after=10)
+
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState,
                                     after: discord.VoiceState):
         if member == self.user:
             return
+
+        # Ensure quiet user data is up-to-date
+        self._quiet_users_update(member)
+
+        # The handle to the general channel
+        general_channel = self.get_channel(ss.TEXT_CHANNEL_IDS["general"])
+
+        # Deafen the user if their status is dnd or invisible
+        await self.deafen_quiet_user(member, after, general_channel)
 
         newly_joined = before.channel is None and after.channel is not None
         current_datetime = datetime.now()
@@ -237,21 +270,27 @@ class SalsaClient(discord.ext.commands.Bot):
                     in ss.WELCOME_GARON_HOME_DAYS and random.random() < ss.WELCOME_GARON_HOME_PROBABILITY and \
                     ss.WELCOME_GARON_HOME_TIME_RANGE[0] <= current_datetime.time() <= \
                     ss.WELCOME_GARON_HOME_TIME_RANGE[1]:
-                await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(
-                    f'Welcome home {member.mention}! How was work?')
+                await general_channel.send(f'Welcome home {member.mention}! How was work?')
             elif ss.check_enabled(ss.JOIN_MESSAGES, ss.JOIN_MESSAGES_WHITELIST, member.id) and \
                     (random.random() < ss.JOIN_MESSAGES_LIST[member.id][1]):
-                await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.JOIN_MESSAGES_LIST[member.id][0])
+                await general_channel.send(ss.JOIN_MESSAGES_LIST[member.id][0])
             elif ss.BOZO_DETECTION and member.id in ss.BOZO_DETECTION_SENSITIVITY:
                 # Bozo detection :)
                 if random.random() < ss.BOZO_DETECTION_SENSITIVITY[member.id]:
                     bozo_channel = self.get_channel(ss.VOICE_CHANNEL_IDS["Bozo's"])
                     await member.move_to(bozo_channel)
-                    await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.BOZO_DETECTED_GIF)
+                    await general_channel.send(ss.BOZO_DETECTED_GIF)
 
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
         if before == self.user:
             return
+
+        # Updates quiet users, un-deafens when a member is in a voice channel and changes status
+        if self._quiet_users_update(after) and after.voice is not None and after.voice.channel is not None:
+            await after.edit(deafen=False)
+        else:
+            # This will cause a user to immediately be deafened if they change status to invis or dnd while in a vc
+            await self.deafen_quiet_user(after, after.voice, self.get_channel(ss.TEXT_CHANNEL_IDS["general"]))
 
         before_status = fridge.user_status_adjust_mobile(utilities.convert_user_status(before.status),
                                                          before.is_on_mobile())
@@ -290,6 +329,19 @@ class SalsaClient(discord.ext.commands.Bot):
     @property
     def fridge(self):
         return self._fridge
+
+    def _quiet_users_update(self, member: discord.Member):
+        # Maintain a list of 'quiet users' who are in dnd or offline status
+        if member.status in (discord.Status.do_not_disturb, discord.Status.offline):
+            self._quiet_users.add(member.id)
+        else:
+            try:
+                self._quiet_users.remove(member.id)
+                return True
+            except KeyError:
+                pass
+
+        return False
 
 
 def main():

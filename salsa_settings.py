@@ -140,7 +140,8 @@ SALSA_IMAGES = ['https://thecozycook.com/wp-content/uploads/2021/06/Salsa-Recipe
                 'https://www.muydelish.com/wp-content/uploads/2019/12/Salsa-Mexicana-4.jpg',
                 'https://www.eatthis.com/wp-content/uploads/sites/4/2020/01/how-to-make-restaurant-salsa-6.jpg',
                 'https://www.chilipeppermadness.com/wp-content/uploads/2020/01/Chile-de-Arbol-Salsa-Recipe1.jpg',
-                'https://houseofyumm.com/wp-content/uploads/2021/06/Salsa-10-500x500.jpg']
+                'https://houseofyumm.com/wp-content/uploads/2021/06/Salsa-10-500x500.jpg',
+                'https://cdn.discordapp.com/attachments/610280973740802059/1063758845547134986/Screen-Shot-2019-08-21-at-11.14.22-AM.png']
 
 # Shrimp
 SHRIMP_IMAGES = ['https://www.acouplecooks.com/wp-content/uploads/2018/09/Grilled-Shrimp-006.jpg',
