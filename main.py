@@ -52,6 +52,9 @@ class SalsaClient(discord.ext.commands.Bot):
         self._has_run_scheduler = False
         self._update_connected_task = None
 
+        # Used to track the w101 news that has been seen today
+        self._w101_news_headers = set()
+
         # Used to track do not disturb and invisible users
         self._quiet_users = set()
 
@@ -68,6 +71,9 @@ class SalsaClient(discord.ext.commands.Bot):
         number_of_victims = round(len(ss.ID_TO_NAME) / 4)
         ss.SHADOW_TYPING_WHITELIST = random.sample(list(ss.NAME_TO_ID.values()), number_of_victims)
 
+        # Clear news headers
+        self._w101_news_headers.clear()
+
         return self.run_daily(), (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     async def birthday(self, user_id):
@@ -83,6 +89,25 @@ class SalsaClient(discord.ext.commands.Bot):
         await self.get_channel(ss.TEXT_CHANNEL_IDS["general"]).send(ss.FISH_GAMING_WEDNESDAY_LINK)
         return self.fish_gaming_wednesday(), \
             (datetime.now() + timedelta(weeks=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async def w101_news_check(self):
+        async for header, content in utilities.check_w101_news():
+            if header in self._w101_news_headers:
+                continue
+
+            self._w101_news_headers.add(header)
+
+            ian = self.get_user(ss.NAME_TO_ID["Ian"])
+            if ian is not None:
+                embed = discord.Embed(title=f"Wizard101 News: {header}", description=content)
+                await ian.send(embed=embed)
+
+        return self.w101_news_check(), datetime.now() + timedelta(hours=6)
+
+    async def one_time_message(self, msg):
+        general = self.get_channel(ss.TEXT_CHANNEL_IDS["general"])
+        await general.send(msg)
+        return None
 
     async def setup_hook(self):
         # Load app commands
@@ -105,15 +130,90 @@ class SalsaClient(discord.ext.commands.Bot):
         for user_id in ss.BIRTHDAYS.keys():
             self._long_term_scheduler.schedule(self.birthday(user_id), utilities.get_next_birthday(user_id))
 
+        now = datetime.now()
+        schedule_msg = lambda t, msg: self._long_term_scheduler.schedule(self.one_time_message(msg), t)
+
         # Fish gaming Wednesday
         if ss.FISH_GAMING_WEDNESDAY:
-            starting_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            starting_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if starting_time.weekday() == 2:
                 starting_time = starting_time + timedelta(days=1)
             while starting_time.weekday() != 2:
                 starting_time = starting_time + timedelta(days=1)
 
             self._long_term_scheduler.schedule(self.fish_gaming_wednesday(), starting_time)
+
+        # Wizard101 news notifications
+        if ss.W101_NEWS_NOTIFICATIONS:
+            first_check = now + timedelta(hours=6)
+            self._long_term_scheduler.schedule(self.w101_news_check(), first_check)
+
+        # Christmas related messages
+        before_christmas = now.replace(month=12, day=18, hour=0, minute=0, second=0, microsecond=0)
+        before_christmas  = utilities.next_annual_event(before_christmas)
+
+        christmas_eve = now.replace(month=12, day=24, hour=0, minute=0, second=0, microsecond=0)
+        christmas_eve = utilities.next_annual_event(christmas_eve)
+
+        christmas = now.replace(month=12, day=25, hour=0, minute=0, second=0, microsecond=0)
+        christmas = utilities.next_annual_event(christmas)
+
+        schedule_msg(before_christmas, "https://www.youtube.com/watch?v=M16CZ38PuFQ&"\
+            "pp=ygUaY2hyaXN0bWFzIGp1c3QgYSB3ZWVrIGF3YXk%3D")
+
+        schedule_msg(christmas_eve, "It's Christmas Eve! :santa: :cookie: :milk:")
+        schedule_msg(christmas, "Merry Christmas Everyone! :christmas_tree: :gift:")
+
+        # New years
+        new_year = datetime(year=now.year + 1, month=1, day=1, hour=0, \
+                minute=0, second=0, microsecond=0)
+
+        schedule_msg(new_year, "Happy New Year! :fireworks: :sparkler: :champagne_glass:")
+
+        # Halloween
+        halloween = now.replace(month=10, day=31, hour=0, minute=0, second=0, microsecond=0)
+        halloween = utilities.next_annual_event(halloween)
+
+        schedule_msg(halloween, "It's spooky time... :skull: :headstone: :black_cat: :ladder:")
+
+        # 4th of July
+        fourth_of_july = now.replace(month=7, day=4, hour=0, minute=0, second=0, microsecond=0)
+        fourth_of_july = utilities.next_annual_event(fourth_of_july)
+
+        schedule_msg(fourth_of_july, "Happy 4th of July! :flag_us: :fireworks:")
+
+        # Leap day
+        def try_leap_day(datetime):
+            try:
+                return datetime.replace(month=2, day=29, hour=0, minute=0, second=0, microsecond=0)
+            except ValueError:
+                return None
+
+        leap_day = try_leap_day(now)
+        if leap_day is not None and now > leap_day:
+            leap_day = None
+
+        tries = 1
+        while leap_day is None:
+            leap_day = try_leap_day(now.replace(year=now.year + tries))
+            tries += 1
+
+        schedule_msg(leap_day, "It's a leap day! :frog: This doesn't happen very often, so enjoy while it lasts!")
+
+        # Thanksgiving
+        def find_thanksgiving(year):
+            thanksgiving = datetime(year=year, month=11, day=1, hour=0, minute=0, second=0, microsecond=0)
+            while thanksgiving.weekday() != 3:
+                thanksgiving += timedelta(days=1)
+
+            thanksgiving += timedelta(weeks=3)
+            return thanksgiving
+
+        thanksgiving = find_thanksgiving(now.year)
+        if now > thanksgiving:
+            thanksgiving = find_thanksgiving(now.year + 1)
+
+        schedule_msg(thanksgiving, "Have a great Thanksgiving everyone! :turkey: And eat well :yum:")
 
         # Allow long term tasks to be executed
         await self._long_term_scheduler.run()
@@ -201,6 +301,9 @@ class SalsaClient(discord.ext.commands.Bot):
             await reaction.message.add_reaction("🦐")
 
     async def deafen_quiet_user(self, member, voice_state, general_channel):
+        if voice_state is None:
+            return
+
         # Deafen people who are using the status incorrectly
         if voice_state.channel is not None and not voice_state.deaf and member.id in self._quiet_users:
             await member.edit(deafen=True)

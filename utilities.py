@@ -4,9 +4,11 @@ from typing import List, Optional, Tuple
 import fridge
 import asyncio
 import discord
+import requests
 import salsa_settings as ss
 from datetime import datetime
-
+from bs4 import BeautifulSoup
+from bs4 import Tag
 
 class Timer:
     def __init__(self):
@@ -78,17 +80,89 @@ def convert_to_regional_indicators(message):
     return ''.join(cvt_ascii_to_regional_indicators(character) for character in message)
 
 
+def next_annual_event(datetime_this_year):
+    if datetime.now() <= datetime_this_year:
+        return datetime_this_year
+
+    return datetime_this_year.replace(year=datetime_this_year.year + 1)
+
+
 def get_next_birthday(user_id):
     month, day = ss.BIRTHDAYS.get(user_id)
     current_datetime = datetime.now()
 
     birthday_this_year = current_datetime.replace(day=day, month=month, hour=0, minute=0, second=0, microsecond=0)
-    # If this year's birthday has not passed yet
-    if birthday_this_year > current_datetime:
-        return birthday_this_year
+    return next_annual_event(birthday_this_year)
 
-    # Return next year's birthday instead
-    return birthday_this_year.replace(year=current_datetime.year + 1)
+
+# Check the wizard101 news feed for anything good going on today
+async def check_w101_news():
+    loop = asyncio.get_event_loop()
+    r = await loop.run_in_executor(None, requests.get, ss.W101_NEWS_WEBPAGE)
+    if (r.status_code != 200):
+        return
+
+    soup_c = BeautifulSoup(r.content, features="html.parser")
+    t = soup_c.find("table", {"id": "renderRegionDiv", "class": "renderRegionDiv", "cellspacing": "0", 
+                              "cellpadding": "0", "border": "0", "width": "100%"})
+
+    if not isinstance(t, Tag):
+        return
+
+    r = t.find_all("tr", recursive=False)
+
+    # Generate today's month/day string
+    now = datetime.now()
+    today_str = "{d:%B} {d.day}".format(d=now)
+
+    for row in r:
+        td = row.td
+        if td is None:
+            continue
+
+        div = td.div
+        if div is None:
+            continue
+
+        tables = div.find_all("table")
+        if len(tables) != 2:
+            continue
+
+        top, bottom = tables
+        
+        center = top.center
+        if center is None:
+            continue
+
+        if center.contents and center.contents[0].startswith(today_str):
+            # Found today's news post
+            p = bottom.p
+            if p is None:
+                continue
+
+            contents = p.find_all(string=True)
+            if len(contents) < 2:
+                continue
+
+            header, content = [s.strip() for s in contents][:2]
+
+            key = " ".join([header, content]).lower()
+            has = lambda *s: all(x in key for x in s)
+            matches = any(( \
+                has("free", "wizard city"), \
+                has("free", "krokotopia"), \
+                has("new", "member", "save", "50%"), \
+                has("elixir", "sale"), \
+                has("mastery", "amulet", "sale"), \
+                has("five", "b.o.x.e.s"), \
+                has("free", "crowns"), \
+                has("mystery", "discount"), \
+                has("free", "pack"), \
+                has("free", "membership"), \
+            ))
+                
+            if matches:
+                yield header, content
 
 
 def convert_user_status(status: discord.Status) -> fridge.UserStatus:

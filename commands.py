@@ -122,6 +122,10 @@ async def _default_match(command_name: str, command_text: str) -> Optional[List[
 
 # Verifies that a user is a Member and that they have the 'big boss role'
 def _has_boss_role(member):
+    # Override for me
+    if member.id == ss.NAME_TO_ID['Ian']:
+        return True
+
     if not isinstance(member, discord.Member):
         return False
 

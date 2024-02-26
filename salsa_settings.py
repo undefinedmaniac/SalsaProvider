@@ -153,6 +153,10 @@ SHRIMP_IMAGES = ['https://www.acouplecooks.com/wp-content/uploads/2018/09/Grille
 FISH_GAMING_WEDNESDAY = True
 FISH_GAMING_WEDNESDAY_LINK = 'https://www.youtube.com/watch?v=vEVGoSaJ9K8'
 
+# Wizard101 news
+W101_NEWS_NOTIFICATIONS = True
+W101_NEWS_WEBPAGE = 'https://www.wizard101.com/game/news'
+
 # Insults
 
 
