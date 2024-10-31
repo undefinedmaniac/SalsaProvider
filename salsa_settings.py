@@ -116,13 +116,13 @@ JOIN_MESSAGES_WHITELIST = JOIN_MESSAGES_LIST.keys()
 # Bozo detection service
 BOZO_DETECTION = True
 BOZO_DETECTED_GIF = 'https://tenor.com/view/bozo-detected-bozo-detected-bozo-found-found-gif-23176259'
-BOZO_DETECTION_SENSITIVITY = {NAME_TO_ID["Reen"]: 1/10.0, NAME_TO_ID["Garon"]: 1/25.0}
+BOZO_DETECTION_SENSITIVITY = {NAME_TO_ID["Reen"]: 1/20.0, NAME_TO_ID["Garon"]: 1/25.0}
 
 
 # Welcome Garon home from work
 WELCOME_GARON_HOME = True
-WELCOME_GARON_HOME_DAYS = [0, 2, 3, 4, 5]
-WELCOME_GARON_HOME_TIME_RANGE = (time(hour=21, minute=30), time(hour=22, minute=30))  # 9:30 - 10:30
+WELCOME_GARON_HOME_DAYS = [0, 1, 2, 3, 4, 5]
+WELCOME_GARON_HOME_TIME_RANGE = (time(hour=17, minute=0), time(hour=18, minute=0))  # 5:00 - 6:00
 WELCOME_GARON_HOME_PROBABILITY = 1.0/2.0
 
 

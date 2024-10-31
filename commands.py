@@ -540,6 +540,16 @@ def _choose_from():
                         invoke_func=invoke, match_func=match)
 
 
+def _tea_me():
+    async def invoke(context: CommandContext) -> None:
+        c = random.choice(["a Green", "a White", "a black", "an oolong", "a yellow", 
+                           "a raw puerh", "a ripe puerh"])
+        await context.send(f'I think you should drink {c}')
+
+    return SalsaCommand(name='teame', description="Chooses a category of tea for you :)",
+                        invoke_func=invoke)
+
+
 MAGIC_8_BALL_RESPONSES = ["It is certain", "It is decidedly so", "Without a doubt", "Yes - definitely",
                           "You may rely on it", "As I see it, yes", "Most likely", "Outlook good", "Yes",
                           "Signs point to yes", "Reply hazy, try again", "Ask again later", "Better not tell you now",
@@ -625,8 +635,8 @@ def _sync():
 
 # Constants containing the command objects in the correct processing order
 JUGGLE_COMMAND = _juggle()
-SLASH_COMMANDS = (RedoCommand(), _choose_from(), _flip_a_coin(), _magic_8_ball(), _pick_a_number(), _move_all(),
-                  JUGGLE_COMMAND, _seen(), _thanks(), _help())
+SLASH_COMMANDS = (RedoCommand(), _choose_from(), _tea_me(), _flip_a_coin(), _magic_8_ball(), 
+                  _pick_a_number(), _move_all(), JUGGLE_COMMAND, _seen(), _thanks(), _help())
 NICK_COMMANDS = (_nick_set(), _nick_clear())
 TEXT_COMMANDS = (_sync(),) + SLASH_COMMANDS + NICK_COMMANDS
 
